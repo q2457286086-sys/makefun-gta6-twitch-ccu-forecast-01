@@ -22,7 +22,10 @@
 //      distribution of that hour's log-ratio: a blend of the interpolated
 //      weighted empirical quantiles (which carry the real, asymmetric shape)
 //      and a weighted normal fit (which steadies the tails where the reference
-//      set is thin). The median of the blend is the forecast's centre; the
+//      set is thin). The normal fit uses a robust centre and spread (the
+//      weighted median and a MAD-based standard deviation), so one comparable
+//      with an extreme launch-day shape cannot inflate the whole hour's
+//      spread. The median of the blend is the forecast's centre; the
 //      spread is honest, because the pinball loss punishes a forecast that is
 //      too narrow just as it punishes one that is too wide.
 //   4. Scale by the case's own hour-1 print: q_tau(h) = p1 * exp(blend_tau(h)).
@@ -130,6 +133,20 @@ const weightedMeanSd = (pairs: Array<[number, number]>): [number, number] => {
   return [mu, Math.sqrt(Math.max(variance, 1e-6))];
 };
 
+/** A robust centre and spread for the normal fit: the weighted median and a
+ *  MAD-based standard deviation. One comparable with an extreme launch-day
+ *  shape no longer inflates the whole hour's spread. */
+const robustCentreSpread = (pairs: Array<[number, number]>): [number, number] => {
+  const sorted = [...pairs].sort((a, b) => a[0] - b[0]);
+  const total = sorted.reduce((a, [, w]) => a + w, 0);
+  if (total <= 0 || sorted.length === 0) return [0, 1];
+  const median = weightedQuantile(pairs, 0.5);
+  const madPairs: Array<[number, number]> = sorted.map(([v, w]) => [Math.abs(v - median), w]);
+  const mad = weightedQuantile(madPairs, 0.5);
+  // 1.4826 makes the MAD consistent with the normal standard deviation.
+  return [median, Math.max(1.4826 * mad, 1e-6)];
+};
+
 /** The weighted quantile of (value, weight) pairs, linearly interpolated on the weighted CDF. */
 const weightedQuantile = (pairs: Array<[number, number]>, tau: number): number => {
   const sorted = [...pairs].sort((a, b) => a[0] - b[0]);
@@ -159,7 +176,7 @@ const weightedQuantile = (pairs: Array<[number, number]>, tau: number): number =
 
 /** The five quantiles of one hour's log-ratio, blended from the empirical quantiles and a normal fit. */
 const hourLogQuantiles = (pairs: Array<[number, number]>): number[] => {
-  const [mu, sd] = weightedMeanSd(pairs);
+  const [mu, sd] = robustCentreSpread(pairs);
   return LEVELS.map((tau, j) => {
     const empirical = weightedQuantile(pairs, tau);
     const normal = mu + Z[j] * sd;
