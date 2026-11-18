@@ -16,8 +16,12 @@
 //      console-only launch (no PC) counts more, because GTA VI is PS5/Xbox
 //      only; a rolling midnight-local unlock counts more, because GTA VI
 //      unlocks at midnight local, country by country; an early-access
-//      contaminated launch counts less. The reference set is the comparables
-//      whose weight clears the bar (at least the ten heaviest when too few do).
+//      contaminated launch counts less. A comparable also counts more when
+//      its hour-1 size is close to this launch's: launches of a similar size
+//      have more similar launch-day shapes, so a Gaussian kernel on the log
+//      hour-1 count (bandwidth 2.0) down-weights comparables far smaller or
+//      larger. The reference set is the comparables whose weight clears the
+//      bar (at least the ten heaviest when too few do).
 //   3. For each forecast hour, the quantiles come from the reference set's
 //      distribution of that hour's log-ratio: a blend of the interpolated
 //      weighted empirical quantiles (which carry the real, asymmetric shape)
@@ -33,8 +37,10 @@
 //      The log-quantile curve is lightly smoothed across neighbouring hours
 //      (×0.2), because the true launch-day shape moves smoothly hour to hour
 //      and the per-hour estimates are noisy. Leave-one-out over the
-//      comparables: console-only 0.2059 (was 0.2079), overall 0.8327 (was
-//      0.8285, within noise).
+//      comparables: console-only 0.1815 (was 0.2059), overall 0.4604 (was
+//      0.8327) — the scale kernel is the big win: the worst-shaped launches
+//      (Silksong 1.77, Kingdom Come II 1.57, Wukong 1.55) collapse once the
+//      reference set is the launches closest in size as well as in kind.
 //   4. Scale by the case's own hour-1 print: q_tau(h) = p1 * exp(blend_tau(h)).
 //      Hour 1 is the anchor the case gives us, so the forecast moves with it.
 //
@@ -73,6 +79,11 @@ const REFERENCE_WEIGHT = 1.5;
 const MIN_REFERENCE = 10;
 /** Neighbour-hour smoothing weight for the log-quantile curves. */
 const SMOOTH = 0.2;
+/** Bandwidth, in log space, of the Gaussian kernel that weights a
+ *  comparable by how close its hour-1 size is to this launch's: launches
+ *  of a similar size have more similar launch-day shapes, so a comparable
+ *  far smaller or larger than this launch counts less. */
+const SCALE_BANDWIDTH = 2.0;
 
 interface HourlyPoint {
   from: string;
@@ -199,12 +210,23 @@ const forecastCase = (c: CaseFile): Array<{ hour: number; q: number[] }> => {
   if (first === undefined) throw new Error('case has no hour-1 print');
   const p1 = Math.max(1, first.viewers);
 
-  // The reference set: the comparables that resemble this launch most.
-  const scored = (c.comparables ?? []).map((comp) => ({ comp, w: relevance(comp) }));
+  // The reference set: the comparables that resemble this launch most, in
+  // kind and in size. The scale kernel compares each comparable's hour-1
+  // count with this launch's own hour-1 print (p1), which the case gives us.
+  const scored = (c.comparables ?? []).map((comp) => {
+    const day = releaseDay(comp);
+    let w = relevance(comp);
+    const h1 = day[0];
+    if (h1 !== null && h1 > 0) {
+      const d = Math.log(p1) - Math.log(h1);
+      w *= Math.exp(-(d * d) / (2 * SCALE_BANDWIDTH * SCALE_BANDWIDTH));
+    }
+    return { comp, day, w };
+  });
   scored.sort((a, b) => b.w - a.w);
   let reference = scored.filter((s) => s.w >= REFERENCE_WEIGHT);
   if (reference.length < MIN_REFERENCE) reference = scored.slice(0, MIN_REFERENCE);
-  const days = reference.map((s) => ({ day: releaseDay(s.comp), w: s.w }));
+  const days = reference.map((s) => ({ day: s.day, w: s.w }));
 
   // This hour's log-ratio quantiles, for every forecast hour.
   const logCurves: number[][] = c.forecast.map(({ hour }) => {
